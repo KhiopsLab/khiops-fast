@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "khiops-fast"
+version = "0.1.0"
+description = "Interface scikit-learn de Khiops avec déploiement rapide via khiops-kni"
+readme = "README.md"
+license = { file = "LICENSE.md" }
+requires-python = ">=3.10"
+dependencies = [
+    "khiops>=11.0.1,<11.1",
+    "khiops-kni>=11.0.1",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
