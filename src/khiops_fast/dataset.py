@@ -1067,6 +1067,25 @@ class PandasTable(DatasetTable):
     def create_table_file_for_khiops(
         self, output_dir, sort=True, target_column=None, target_column_id=None
     ):
+        # Create the output table resource object
+        output_table_path = fs.get_child_path(output_dir, f"{self.name}.txt")
+        output_dataframe = self.create_khiops_dataframe(
+            sort=sort, target_column=target_column, target_column_id=target_column_id
+        )
+
+        # Write the dataframe to an internal table file
+        with io.StringIO() as output_dataframe_stream:
+            write_internal_data_table(output_dataframe, output_dataframe_stream)
+            fs.write(
+                output_table_path, output_dataframe_stream.getvalue().encode("utf-8")
+            )
+
+        return output_table_path
+
+    def create_khiops_dataframe(
+        self, sort=True, target_column=None, target_column_id=None
+    ):
+        """Returns the dataframe written in the Khiops table file (renamed, sorted)"""
         assert not sort or self.key is not None, "Cannot sort table without a key"
         assert not sort or is_list_like(
             self.key
@@ -1074,9 +1093,6 @@ class PandasTable(DatasetTable):
         assert not sort or len(self.key) > 0, "Cannot sort table with an empty key"
         assert target_column is not None or target_column_id is None
         assert target_column_id is not None or target_column is None
-
-        # Create the output table resource object
-        output_table_path = fs.get_child_path(output_dir, f"{self.name}.txt")
 
         # Write the output dataframe
         output_dataframe = self.data_source.copy()
@@ -1099,14 +1115,7 @@ class PandasTable(DatasetTable):
                 kind="mergesort",
             )
 
-        # Write the dataframe to an internal table file
-        with io.StringIO() as output_dataframe_stream:
-            write_internal_data_table(output_dataframe, output_dataframe_stream)
-            fs.write(
-                output_table_path, output_dataframe_stream.getvalue().encode("utf-8")
-            )
-
-        return output_table_path
+        return output_dataframe
 
 
 class NumpyTable(DatasetTable):
@@ -1152,14 +1161,30 @@ class NumpyTable(DatasetTable):
     def create_table_file_for_khiops(
         self, output_dir, sort=True, target_column=None, target_column_id=None
     ):
+        # Create the output table resource object
+        output_table_path = fs.get_child_path(output_dir, f"{self.name}.txt")
+        output_dataframe = self.create_khiops_dataframe(
+            sort=sort, target_column=target_column, target_column_id=target_column_id
+        )
+
+        # Write the dataframe to an internal table file
+        with io.StringIO() as output_dataframe_stream:
+            write_internal_data_table(output_dataframe, output_dataframe_stream)
+            fs.write(
+                output_table_path, output_dataframe_stream.getvalue().encode("utf-8")
+            )
+
+        return output_table_path
+
+    def create_khiops_dataframe(
+        self, sort=True, target_column=None, target_column_id=None
+    ):
+        """Returns the dataframe written in the Khiops table file"""
         assert not sort or self.key is not None, "Cannot sort table without a key"
         assert not sort or is_list_like(
             self.key
         ), "Cannot sort table with a key is that is not list-like"
         assert not sort or len(self.key) > 0, "Cannot sort table with an empty key"
-
-        # Create the output table resource object
-        output_table_path = fs.get_child_path(output_dir, f"{self.name}.txt")
 
         # Write the output dataframe
         # Note: This is not optimized for memory.
@@ -1182,14 +1207,7 @@ class NumpyTable(DatasetTable):
                 kind="mergesort",
             )
 
-        # Write the dataframe to an internal table file
-        with io.StringIO() as output_dataframe_stream:
-            write_internal_data_table(output_dataframe, output_dataframe_stream)
-            fs.write(
-                output_table_path, output_dataframe_stream.getvalue().encode("utf-8")
-            )
-
-        return output_table_path
+        return output_dataframe
 
 
 class SparseTable(DatasetTable):
@@ -1311,8 +1329,14 @@ class SparseTable(DatasetTable):
 
         # Create the output table resource object
         output_table_path = fs.get_child_path(output_dir, f"{self.name}.txt")
+        fs.write(
+            output_table_path,
+            self.create_khiops_text(target_column, target_column_id).encode("utf-8"),
+        )
+        return output_table_path
 
-        # Write the sparse matrix to an internal table file
+    def create_khiops_text(self, target_column=None, target_column_id=None):
+        """Returns the content of the Khiops table file of the sparse matrix"""
         with io.StringIO() as output_sparse_matrix_stream:
             if target_column is not None:
                 output_sparse_matrix_stream.write(
@@ -1330,9 +1354,4 @@ class SparseTable(DatasetTable):
                 output_sparse_matrix_stream.write("SparseVariables\n")
                 for row_index in range(self.data_source.shape[0]):
                     self._write_sparse_block(row_index, output_sparse_matrix_stream)
-            fs.write(
-                output_table_path,
-                output_sparse_matrix_stream.getvalue().encode("utf-8"),
-            )
-
-        return output_table_path
+            return output_sparse_matrix_stream.getvalue()

@@ -1,22 +1,32 @@
-"""Tests de non-régression : les estimateurs KhiopsFast* doivent reproduire exactement khiops.sklearn."""
+"""Tests de non-régression : les estimateurs KhiopsFast* doivent reproduire exactement khiops.sklearn,
+avec le déploiement par le runner Khiops ("khiops") comme avec khiops-kni ("kni")."""
 
 import os
+import pickle
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 import pytest
 from khiops import core as kh
 from khiops.sklearn import KhiopsClassifier, KhiopsEncoder, KhiopsRegressor
+from scipy import sparse
 from sklearn.base import clone
 from sklearn.model_selection import train_test_split
 
 from khiops_fast import KhiopsFastClassifier, KhiopsFastEncoder, KhiopsFastRegressor
 
 SAMPLES = kh.get_samples_dir()
+DEPLOYMENTS = ["khiops", "kni"]
 
 
 def read(*parts):
     return pd.read_csv(os.path.join(SAMPLES, *parts), sep="\t")
+
+
+def assert_same_frame(a, b):
+    np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    assert a.shape == b.shape
 
 
 @pytest.fixture(scope="module")
@@ -38,9 +48,30 @@ def accidents():
     main = read("Accidents", "Accidents.txt").sample(2000, random_state=0)
     vehicles = read("Accidents", "Vehicles.txt")
     vehicles = vehicles[vehicles["AccidentId"].isin(main["AccidentId"])]
-    X = {"main_table": (main.drop(columns=["Gravity"]), ["AccidentId"]),
-         "additional_data_tables": {"Vehicles": (vehicles, ["AccidentId", "VehicleId"])}}
-    return X, main["Gravity"]
+    users = read("Accidents", "Users.txt")
+    users = users[users["AccidentId"].isin(main["AccidentId"])]
+    return main, vehicles, users
+
+
+def star(main, vehicles):
+    return {"main_table": (main.drop(columns=["Gravity"]), ["AccidentId"]),
+            "additional_data_tables": {"Vehicles": (vehicles, ["AccidentId", "VehicleId"])}}
+
+
+def snowflake(main, vehicles, users):
+    X = star(main, vehicles)
+    X["additional_data_tables"]["Vehicles/Users"] = (users, ["AccidentId", "VehicleId"])
+    return X
+
+
+@pytest.fixture(scope="module")
+def star_models(accidents):
+    main, vehicles, _ = accidents
+    X, y = star(main, vehicles), main["Gravity"]
+    return X, KhiopsClassifier(n_trees=0).fit(X, y), KhiopsFastClassifier(n_trees=0).fit(X, y)
+
+
+# --- API ------------------------------------------------------------------------------------
 
 
 def test_public_api():
@@ -48,48 +79,124 @@ def test_public_api():
                       (KhiopsFastEncoder, "KhiopsFastEncoder")):
         est = cls()
         assert type(est).__name__ == name and repr(est).startswith(name)
-        assert clone(est).get_params() == est.get_params()
-    assert set(KhiopsFastClassifier().get_params()) == set(KhiopsClassifier().get_params())
-    assert set(KhiopsFastRegressor().get_params()) == set(KhiopsRegressor().get_params())
-    assert set(KhiopsFastEncoder().get_params()) == set(KhiopsEncoder().get_params())
+        assert est.get_params()["deployment"] == "kni"
+        assert clone(est.set_params(deployment="khiops")).get_params()["deployment"] == "khiops"
+    for fast, ref in ((KhiopsFastClassifier, KhiopsClassifier), (KhiopsFastRegressor, KhiopsRegressor),
+                      (KhiopsFastEncoder, KhiopsEncoder)):
+        assert set(fast().get_params()) == set(ref().get_params()) | {"deployment"}
 
 
+def test_invalid_deployment(iris):
+    X_train, X_test, y_train, _ = iris
+    with pytest.raises(ValueError, match="deployment"):
+        KhiopsFastClassifier(deployment="gpu").fit(X_train, y_train)
+    clf = KhiopsFastClassifier().fit(X_train, y_train).set_params(deployment="gpu")
+    with pytest.raises(ValueError, match="deployment"):
+        clf.predict(X_test)
+
+
+# --- mono-table --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("deployment", DEPLOYMENTS)
 @pytest.mark.parametrize("dataset", ["adult", "iris"])
-def test_classifier_same_as_khiops(dataset, request):
+def test_classifier_same_as_khiops(dataset, deployment, request):
     X_train, X_test, y_train, y_test = request.getfixturevalue(dataset)
     ref = KhiopsClassifier().fit(X_train, y_train)
-    fast = KhiopsFastClassifier().fit(X_train, y_train)
+    fast = KhiopsFastClassifier(deployment=deployment).fit(X_train, y_train)
     assert list(fast.classes_) == list(ref.classes_)
     assert fast.n_features_in_ == ref.n_features_in_
     np.testing.assert_array_equal(fast.predict(X_test), ref.predict(X_test))
-    np.testing.assert_allclose(fast.predict_proba(X_test), ref.predict_proba(X_test))
-    assert fast.score(X_test, y_test) == pytest.approx(ref.score(X_test, y_test))
+    np.testing.assert_array_equal(fast.predict_proba(X_test), ref.predict_proba(X_test))
+    assert fast.score(X_test, y_test) == ref.score(X_test, y_test)
 
 
-def test_classifier_multitable_same_as_khiops(accidents):
-    X, y = accidents
-    ref = KhiopsClassifier(n_trees=0).fit(X, y)
-    fast = KhiopsFastClassifier(n_trees=0).fit(X, y)
-    np.testing.assert_array_equal(fast.predict(X), ref.predict(X))
-    np.testing.assert_allclose(fast.predict_proba(X), ref.predict_proba(X))
+@pytest.mark.parametrize("deployment", DEPLOYMENTS)
+def test_classifier_numpy_and_sparse(iris, deployment):
+    X_train, X_test, y_train, _ = iris
+    for convert in (lambda X: X.to_numpy(), lambda X: sparse.csr_matrix(X.to_numpy())):
+        ref = KhiopsClassifier().fit(convert(X_train), y_train)
+        fast = KhiopsFastClassifier(deployment=deployment).fit(convert(X_train), y_train)
+        np.testing.assert_array_equal(fast.predict(convert(X_test)), ref.predict(convert(X_test)))
+        np.testing.assert_array_equal(fast.predict_proba(convert(X_test)), ref.predict_proba(convert(X_test)))
 
 
-def test_regressor_same_as_khiops(adult):
+@pytest.mark.parametrize("deployment", DEPLOYMENTS)
+def test_regressor_same_as_khiops(adult, deployment):
     X_train, X_test, _, _ = adult
     y_train, y_test = X_train["age"], X_test["age"]
     X_train, X_test = X_train.drop(columns=["age"]), X_test.drop(columns=["age"])
     ref = KhiopsRegressor().fit(X_train, y_train)
-    fast = KhiopsFastRegressor().fit(X_train, y_train)
-    np.testing.assert_allclose(fast.predict(X_test), ref.predict(X_test))
-    assert fast.score(X_test, y_test) == pytest.approx(ref.score(X_test, y_test))
+    fast = KhiopsFastRegressor(deployment=deployment).fit(X_train, y_train)
+    np.testing.assert_array_equal(fast.predict(X_test), ref.predict(X_test))
+    assert fast.score(X_test, y_test) == ref.score(X_test, y_test)
 
 
-def test_encoder_same_as_khiops(adult):
+@pytest.mark.parametrize("deployment", DEPLOYMENTS)
+@pytest.mark.parametrize("transform_type", ["part_id", "part_label", "dummies", "conditional_info"])
+def test_encoder_same_as_khiops(adult, deployment, transform_type):
     X_train, X_test, y_train, _ = adult
-    ref = KhiopsEncoder(transform_type_categorical="part_id", transform_type_numerical="part_id").fit(X_train, y_train)
-    fast = KhiopsFastEncoder(transform_type_categorical="part_id", transform_type_numerical="part_id").fit(X_train, y_train)
-    ref_out, fast_out = ref.transform(X_test), fast.transform(X_test)
-    assert fast_out.shape == ref_out.shape
-    np.testing.assert_array_equal(np.asarray(fast_out), np.asarray(ref_out))
-    np.testing.assert_array_equal(np.asarray(fast.fit_transform(X_train, y_train)),
-                                  np.asarray(ref.fit_transform(X_train, y_train)))
+    params = {"transform_type_categorical": transform_type, "transform_type_numerical": transform_type}
+    ref = KhiopsEncoder(**params).fit(X_train, y_train)
+    fast = KhiopsFastEncoder(deployment=deployment, **params).fit(X_train, y_train)
+    assert_same_frame(fast.transform(X_test), ref.transform(X_test))
+
+
+def test_encoder_fit_transform(adult):
+    X_train, _, y_train, _ = adult
+    ref = KhiopsEncoder().fit_transform(X_train, y_train)
+    assert_same_frame(KhiopsFastEncoder().fit_transform(X_train, y_train), ref)
+
+
+# --- multi-table -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("deployment", DEPLOYMENTS)
+def test_classifier_star_same_as_khiops(star_models, deployment):
+    X, ref, fast = star_models
+    fast.set_params(deployment=deployment)
+    np.testing.assert_array_equal(fast.predict(X), ref.predict(X))
+    np.testing.assert_array_equal(fast.predict_proba(X), ref.predict_proba(X))
+
+
+def test_classifier_star_unsorted_and_missing_secondary(star_models, accidents):
+    _, ref, fast = star_models
+    main, vehicles, _ = accidents
+    main = main.sample(frac=1, random_state=1)
+    vehicles = vehicles[~vehicles["AccidentId"].isin(main["AccidentId"].iloc[:200])].sample(frac=1, random_state=2)
+    X = star(main, vehicles)
+    expected = ref.predict_proba(X)
+    np.testing.assert_array_equal(fast.set_params(deployment="kni").predict_proba(X), expected)
+
+
+@pytest.mark.parametrize("deployment", DEPLOYMENTS)
+def test_snowflake_same_as_khiops(accidents, deployment):
+    main, vehicles, users = accidents
+    X, y = snowflake(main, vehicles, users), main["Gravity"]
+    ref = KhiopsClassifier(n_trees=0).fit(X, y)
+    fast = KhiopsFastClassifier(n_trees=0, deployment=deployment).fit(X, y)
+    np.testing.assert_array_equal(fast.predict_proba(X), ref.predict_proba(X))
+    ref_enc = KhiopsEncoder().fit(X, y)
+    fast_enc = KhiopsFastEncoder(deployment=deployment).fit(X, y)
+    assert_same_frame(fast_enc.transform(X), ref_enc.transform(X))
+
+
+# --- robustesse ---------------------------------------------------------------------------------
+
+
+def test_threads_are_serialized(adult):
+    X_train, X_test, y_train, _ = adult
+    clf = KhiopsFastClassifier(deployment="kni").fit(X_train, y_train)
+    expected = clf.predict_proba(X_test)
+    chunks = np.array_split(np.arange(len(X_test)), 8)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda idx: clf.predict_proba(X_test.iloc[idx]), chunks))
+    np.testing.assert_array_equal(np.vstack(results), expected)
+
+
+def test_pickle_and_switch_after_fit(iris):
+    X_train, X_test, y_train, _ = iris
+    clf = pickle.loads(pickle.dumps(KhiopsFastClassifier(deployment="khiops").fit(X_train, y_train)))
+    expected = clf.predict_proba(X_test)
+    assert clf.deployment == "khiops"
+    np.testing.assert_array_equal(clf.set_params(deployment="kni").predict_proba(X_test), expected)
