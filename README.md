@@ -20,6 +20,7 @@ au lieu de lancer le runner Khiops à chaque déploiement.
 | Valeur | `predict` / `predict_proba` / `transform` |
 |---|---|
 | `"kni"` (défaut) | déploiement en mémoire avec khiops-kni ([kni_deploy.py](src/khiops_fast/kni_deploy.py)) |
+| `"kni_parallel"` | idem, lignes réparties entre `n_jobs` processus KNI |
 | `"khiops"` | runner Khiops sur fichiers temporaires, identique à khiops.sklearn |
 
 - `fit` utilise toujours le runner Khiops ; on peut changer de mode après apprentissage avec
@@ -32,7 +33,22 @@ au lieu de lancer le runner Khiops à chaque déploiement.
 - Pas de repli silencieux : une erreur KNI lève une `RuntimeError` avec l'étape et le journal KNI.
 - Non supporté en mode `"kni"` : blocs de variables dans la sortie (utiliser `"khiops"`).
 
-**Étape 3 (à faire)** : déploiement KNI en parallèle (pool de processus ayant chacun leur KNI).
+**Étape 3 (fait)** : `deployment="kni_parallel"` et paramètre `n_jobs` (convention scikit-learn : `None` = 1,
+`-1` = tous les cœurs utilisables, `-2` = tous sauf un ; ignoré par les autres modes).
+
+- La table principale est coupée en blocs de lignes consécutives, chacun avec ses lignes secondaires ;
+  chaque bloc est sérialisé et recodé par un processus ayant sa propre KNI ; le parent concatène les
+  sorties dans l'ordre et les relit une seule fois (résultat identique au mode `"kni"`).
+- Pool de processus persistant (`forkserver`), créé au premier appel et réutilisé, recréé si `n_jobs` change ;
+  `khiops_fast.shutdown_kni_pool()` l'arrête (il l'est aussi à la sortie du programme).
+- En dessous de `MIN_ROWS_PER_CHUNK` (5 000) lignes par processus, le déploiement reste dans le processus
+  courant : la latence des petites prédictions est celle du mode `"kni"`.
+- Une erreur dans un processus est relancée dans le parent avec le numéro du bloc ; le pool reste utilisable.
+- **Scripts** : comme pour tout pool `forkserver`/`spawn`, le code principal d'un script doit être protégé par
+  `if __name__ == "__main__":` (inutile dans Jupyter).
+
+**Optimisation commune aux trois modes** : le remplacement des retours à la ligne dans les colonnes texte
+n'est appliqué qu'aux colonnes qui en contiennent (fichiers identiques, environ 2,5 s gagnées sur 100 000 lignes).
 
 ## Installation
 
@@ -49,6 +65,7 @@ from khiops_fast import KhiopsFastClassifier
 clf = KhiopsFastClassifier().fit(X_train, y_train)          # deployment="kni" par défaut
 proba = clf.predict_proba(X_test)
 proba_runner = clf.set_params(deployment="khiops").predict_proba(X_test)   # identique
+proba_8 = clf.set_params(deployment="kni_parallel", n_jobs=8).predict_proba(X_test)  # identique
 ```
 
 Les paramètres, les formats d'entrée (pandas, numpy, sparse, multi-table
@@ -68,7 +85,7 @@ triées, les lignes sans enregistrement secondaire, les appels concurrents depui
 Comparaison des temps de prédiction :
 
 ```bash
-python benchmarks/bench_deploy.py --sizes 1 100 10000 100000
+python benchmarks/bench_deploy.py --sizes 1 100 10000 100000 1000000 --n-jobs 2 4 8 16
 ```
 
 ## Licence

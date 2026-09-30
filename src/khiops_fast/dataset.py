@@ -363,6 +363,17 @@ def read_internal_data_table(file_path_or_stream, column_dtypes=None):
     )
 
 
+def _contains_line_break(series):
+    try:
+        return bool(
+            series.str.contains("\n", regex=False, na=False).any()
+            or series.str.contains("\r", regex=False, na=False).any()
+        )
+    except AttributeError:
+        # No .str accessor (e.g. object column without strings): keep the full replace
+        return True
+
+
 def write_internal_data_table(dataframe, file_path_or_stream):
     """Writes a DataFrame to data table file with the internal format settings
 
@@ -395,6 +406,10 @@ def write_internal_data_table(dataframe, file_path_or_stream):
     # extension dtypes (e.g. Int64) to a string returns a scalar bool
     # instead of a boolean mask, crashing DataFrame.replace().
     string_columns = dataframe.select_dtypes(include=["object", "string"]).columns
+    # The regex replace is slow: apply it only to the columns containing "\r"/"\n"
+    string_columns = [
+        column for column in string_columns if _contains_line_break(dataframe[column])
+    ]
     if len(string_columns) > 0:
         # assign() only rebuilds the modified columns; unmodified columns
         # keep referencing the original data (no full-frame copy needed)

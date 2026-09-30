@@ -14,6 +14,13 @@ from khiops_fast.estimators import (
     KhiopsFastRegressor,
 )
 from khiops_fast.helpers import train_test_split_dataset
+from khiops_fast.kni_deploy import shutdown_kni_pool
 
-__all__ = ["KhiopsFastClassifier", "KhiopsFastEncoder", "KhiopsFastRegressor", "train_test_split_dataset"]
+__all__ = [
+    "KhiopsFastClassifier",
+    "KhiopsFastEncoder",
+    "KhiopsFastRegressor",
+    "shutdown_kni_pool",
+    "train_test_split_dataset",
+]
 __version__ = "0.1.0"

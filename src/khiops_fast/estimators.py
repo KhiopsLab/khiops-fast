@@ -51,7 +51,12 @@ from khiops_fast.dataset import (
     get_khiops_variable_name,
     read_internal_data_table,
 )
-from khiops_fast.kni_deploy import check_deployment, deploy_model_kni
+from khiops_fast.kni_deploy import (
+    check_deployment,
+    check_n_jobs,
+    deploy_model_kni,
+    deploy_model_kni_parallel,
+)
 
 # Disable PEP8 variable names because of scikit-learn X,y conventions
 # To capture invalid-names other than X,y run:
@@ -484,15 +489,26 @@ class KhiopsEstimator(ABC, BaseEstimator):
         # In-memory deployment with KNI: the rows keep the order of the main table
         deployment = getattr(self, "deployment", "khiops")
         check_deployment(deployment)
-        if deployment == "kni":
-            raw_output_table_df = deploy_model_kni(
-                deployment_ds,
-                deployment_dictionary_domain,
-                self.model_main_dictionary_name_,
-                computation_dir,
-                internal_table_column_dtypes,
-                sort=self.auto_sort,
-            )
+        if deployment in ("kni", "kni_parallel"):
+            if deployment == "kni":
+                raw_output_table_df = deploy_model_kni(
+                    deployment_ds,
+                    deployment_dictionary_domain,
+                    self.model_main_dictionary_name_,
+                    computation_dir,
+                    internal_table_column_dtypes,
+                    sort=self.auto_sort,
+                )
+            else:
+                raw_output_table_df = deploy_model_kni_parallel(
+                    deployment_ds,
+                    deployment_dictionary_domain,
+                    self.model_main_dictionary_name_,
+                    computation_dir,
+                    internal_table_column_dtypes,
+                    sort=self.auto_sort,
+                    n_jobs=self.n_jobs,
+                )
             if not deployment_ds.is_multitable:
                 return raw_output_table_df
             key = deployment_ds.main_table.key
@@ -1225,6 +1241,7 @@ class KhiopsSupervisedEstimator(KhiopsEstimator):
         output_dir=None,
         auto_sort=True,
         deployment="kni",
+        n_jobs=None,
     ):
         super().__init__(
             verbose=verbose,
@@ -1232,6 +1249,7 @@ class KhiopsSupervisedEstimator(KhiopsEstimator):
             auto_sort=auto_sort,
         )
         self.deployment = deployment
+        self.n_jobs = n_jobs
         self.n_features = n_features
         self.n_trees = n_trees
         self.n_text_features = n_text_features
@@ -1298,6 +1316,7 @@ class KhiopsSupervisedEstimator(KhiopsEstimator):
 
         # Check supervised estimator parameters
         check_deployment(self.deployment)
+        check_n_jobs(self.n_jobs)
         if not isinstance(self.n_features, int):
             raise TypeError(type_error_message("n_features", self.n_features, int))
         if self.n_features < 0:
@@ -1408,6 +1427,7 @@ class KhiopsSupervisedEstimator(KhiopsEstimator):
         del kwargs["output_dir"]
         del kwargs["auto_sort"]
         del kwargs["deployment"]
+        del kwargs["n_jobs"]
 
         # Set the sampling percentage to a 100%
         kwargs["sample_percentage"] = 100
@@ -1558,6 +1578,7 @@ class KhiopsPredictor(KhiopsSupervisedEstimator):
         output_dir=None,
         auto_sort=True,
         deployment="kni",
+        n_jobs=None,
     ):
         super().__init__(
             n_features=n_features,
@@ -1573,6 +1594,7 @@ class KhiopsPredictor(KhiopsSupervisedEstimator):
             output_dir=output_dir,
             auto_sort=auto_sort,
             deployment=deployment,
+            n_jobs=n_jobs,
         )
         # Data to be specified by inherited classes
         self._predicted_target_meta_data_tag = None
@@ -1752,10 +1774,14 @@ class KhiopsFastClassifier(ClassifierMixin, KhiopsPredictor):
         affects the `fit`, `predict` and `predict_proba` methods.
         *Note* The sort by key is performed in a left-to-right, hierarchical,
         lexicographic manner.
-    deployment : {"kni", "khiops"}, default "kni"
+    deployment : {"kni", "kni_parallel", "khiops"}, default "kni"
         Engine used by `predict` and `predict_proba`: ``"kni"`` deploys the model in
-        memory with khiops-kni, ``"khiops"`` runs the Khiops runner on temporary files.
+        memory with khiops-kni, ``"kni_parallel"`` splits the rows among ``n_jobs``
+        KNI processes, ``"khiops"`` runs the Khiops runner on temporary files.
         KNI is not reentrant: concurrent calls within a process are serialized.
+    n_jobs : int, optional
+        Number of processes for ``deployment="kni_parallel"`` (``None``: 1, ``-1``: all
+        the usable cores). Ignored by the other deployment modes.
 
     Attributes
     ----------
@@ -1805,6 +1831,7 @@ class KhiopsFastClassifier(ClassifierMixin, KhiopsPredictor):
         output_dir=None,
         auto_sort=True,
         deployment="kni",
+        n_jobs=None,
     ):
         super().__init__(
             n_features=n_features,
@@ -1820,6 +1847,7 @@ class KhiopsFastClassifier(ClassifierMixin, KhiopsPredictor):
             output_dir=output_dir,
             auto_sort=auto_sort,
             deployment=deployment,
+            n_jobs=n_jobs,
         )
         self.n_pairs = n_pairs
         self.specific_pairs = specific_pairs
@@ -2164,10 +2192,14 @@ class KhiopsFastRegressor(RegressorMixin, KhiopsPredictor):
         affects the `fit` and `predict` methods.
         *Note* The sort by key is performed in a left-to-right, hierarchical,
         lexicographic manner.
-    deployment : {"kni", "khiops"}, default "kni"
+    deployment : {"kni", "kni_parallel", "khiops"}, default "kni"
         Engine used by `predict`: ``"kni"`` deploys the model in memory with
-        khiops-kni, ``"khiops"`` runs the Khiops runner on temporary files.
+        khiops-kni, ``"kni_parallel"`` splits the rows among ``n_jobs`` KNI processes,
+        ``"khiops"`` runs the Khiops runner on temporary files.
         KNI is not reentrant: concurrent calls within a process are serialized.
+    n_jobs : int, optional
+        Number of processes for ``deployment="kni_parallel"`` (``None``: 1, ``-1``: all
+        the usable cores). Ignored by the other deployment modes.
 
     Attributes
     ----------
@@ -2204,6 +2236,7 @@ class KhiopsFastRegressor(RegressorMixin, KhiopsPredictor):
         output_dir=None,
         auto_sort=True,
         deployment="kni",
+        n_jobs=None,
     ):
         super().__init__(
             n_features=n_features,
@@ -2219,6 +2252,7 @@ class KhiopsFastRegressor(RegressorMixin, KhiopsPredictor):
             output_dir=output_dir,
             auto_sort=auto_sort,
             deployment=deployment,
+            n_jobs=n_jobs,
         )
         self._khiops_model_prefix = "SNB_"
         self._khiops_baseline_model_prefix = "B_"
@@ -2421,10 +2455,14 @@ class KhiopsFastEncoder(TransformerMixin, KhiopsSupervisedEstimator):
         affects the `fit` and `transform` methods.
         *Note* The sort by key is performed in a left-to-right, hierarchical,
         lexicographic manner.
-    deployment : {"kni", "khiops"}, default "kni"
+    deployment : {"kni", "kni_parallel", "khiops"}, default "kni"
         Engine used by `transform`: ``"kni"`` deploys the model in memory with
-        khiops-kni, ``"khiops"`` runs the Khiops runner on temporary files.
+        khiops-kni, ``"kni_parallel"`` splits the rows among ``n_jobs`` KNI processes,
+        ``"khiops"`` runs the Khiops runner on temporary files.
         KNI is not reentrant: concurrent calls within a process are serialized.
+    n_jobs : int, optional
+        Number of processes for ``deployment="kni_parallel"`` (``None``: 1, ``-1``: all
+        the usable cores). Ignored by the other deployment modes.
 
     Attributes
     ----------
@@ -2467,6 +2505,7 @@ class KhiopsFastEncoder(TransformerMixin, KhiopsSupervisedEstimator):
         output_dir=None,
         auto_sort=True,
         deployment="kni",
+        n_jobs=None,
     ):
         super().__init__(
             n_features=n_features,
@@ -2479,6 +2518,7 @@ class KhiopsFastEncoder(TransformerMixin, KhiopsSupervisedEstimator):
             output_dir=output_dir,
             auto_sort=auto_sort,
             deployment=deployment,
+            n_jobs=n_jobs,
         )
         self.n_pairs = n_pairs
         self.specific_pairs = specific_pairs
